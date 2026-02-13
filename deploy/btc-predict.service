@@ -12,7 +12,8 @@ ExecStart=/home/pi/AI-Startup-Lab/bitcoin-prediction/.venv/bin/streamlit run app
     --server.address=127.0.0.1 \
     --server.headless=true \
     --browser.gatherUsageStats=false \
-    --server.fileWatcherType=none
+    --server.fileWatcherType=none \
+    --server.baseUrlPath=ibit
 Restart=always
 RestartSec=10
 Environment=PYTHONUNBUFFERED=1

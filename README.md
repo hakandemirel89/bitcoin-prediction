@@ -104,7 +104,8 @@ Dashboard pages:
 ## Deployment on Raspberry Pi
 
 The dashboard is designed to run on a Raspberry Pi 5 behind Caddy reverse proxy
-with automatic HTTPS and basic auth.
+with automatic HTTPS and basic auth. It is served under the `/ibit` subpath,
+leaving the root path free for other services on the same domain.
 
 ### Prerequisites
 
@@ -165,7 +166,7 @@ tail -f /var/log/caddy/btc-predict.log
 
 ### Security Notes
 
-- Dashboard is behind **basic auth** (username: `admin`)
+- Dashboard is behind **basic auth** (username: `pi`)
 - HTTPS is automatic via Let's Encrypt (Caddy handles renewal)
 - Streamlit binds to `127.0.0.1` only (not directly exposed)
 - Security headers: `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`

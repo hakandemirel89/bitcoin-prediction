@@ -52,22 +52,18 @@ echo "[3/5] Writing Caddy config..."
 sudo mkdir -p /var/log/caddy
 cat <<CADDYEOF | sudo tee "$CADDY_CONFIG" > /dev/null
 lnodebtc.duckdns.org {
-    basicauth * {
-        admin ${HASH}
-    }
+    handle /ibit* {
+        basicauth {
+            pi ${HASH}
+        }
 
-    reverse_proxy 127.0.0.1:8501
+        reverse_proxy 127.0.0.1:8501
 
-    @websockets {
-        header Connection *Upgrade*
-        header Upgrade    websocket
-    }
-    reverse_proxy @websockets 127.0.0.1:8501
-
-    header {
-        X-Content-Type-Options nosniff
-        X-Frame-Options DENY
-        Referrer-Policy strict-origin-when-cross-origin
+        header {
+            X-Content-Type-Options nosniff
+            X-Frame-Options DENY
+            Referrer-Policy strict-origin-when-cross-origin
+        }
     }
 
     log {
@@ -107,8 +103,8 @@ echo "=========================================="
 echo " Deployment complete!"
 echo "=========================================="
 echo ""
-echo " Dashboard URL:  https://lnodebtc.duckdns.org"
-echo " Username:       admin"
+echo " Dashboard URL:  https://lnodebtc.duckdns.org/ibit"
+echo " Username:       pi"
 echo " Password:       (the one you just entered)"
 echo ""
 echo " Services:"
