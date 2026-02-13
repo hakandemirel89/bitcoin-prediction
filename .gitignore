@@ -5,6 +5,7 @@
 __pycache__/
 *.pyc
 *.pyo
+*.egg-info/
 
 # Pytest
 .pytest_cache/
@@ -12,11 +13,24 @@ __pycache__/
 # IDE
 .vscode/
 .idea/
+*.swp
+*.swo
 
 # Artifacts (models are large, regenerate locally)
 artifacts/*.pt
 artifacts/*.pkl
 
+# Secrets / env
+.env
+.env.*
+*.secret
+
 # OS
 .DS_Store
 Thumbs.db
+
+# Streamlit
+.streamlit/secrets.toml
+
+# Logs
+*.log

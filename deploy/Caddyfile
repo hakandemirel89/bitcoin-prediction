@@ -1,0 +1,30 @@
+lnodebtc.duckdns.org {
+    # Automatic HTTPS via Let's Encrypt
+    # Basic auth — generate hash with: caddy hash-password
+    basicauth * {
+        # Replace <HASH> with output of: caddy hash-password
+        # Example: caddy hash-password --plaintext 'YourSecurePassword'
+        admin <HASH>
+    }
+
+    reverse_proxy 127.0.0.1:8501
+
+    # WebSocket support (required by Streamlit)
+    @websockets {
+        header Connection *Upgrade*
+        header Upgrade    websocket
+    }
+    reverse_proxy @websockets 127.0.0.1:8501
+
+    # Security headers
+    header {
+        X-Content-Type-Options nosniff
+        X-Frame-Options DENY
+        Referrer-Policy strict-origin-when-cross-origin
+    }
+
+    log {
+        output file /var/log/caddy/btc-predict.log
+        format console
+    }
+}

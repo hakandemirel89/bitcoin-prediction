@@ -12,6 +12,11 @@
 | 2026-02-13 | Both online sources working: Farside (523 rows IBIT flows) + yfinance (774 rows BTC prices) | `src/providers.py` |
 | 2026-02-13 | CSV fallbacks updated with real data from online sources | `data/ibit_flows.csv`, `data/btc_prices.csv` |
 | 2026-02-13 | Demo default changed from `force_csv=True` to `force_csv=False` (online first) | `notebooks/demo.py` |
+| 2026-02-13 | Added Streamlit dashboard (4 pages: Data Explorer, Model, Backtest, Daily Prediction) | `app.py` |
+| 2026-02-13 | Added deployment: systemd service, Caddy reverse proxy, setup script | `deploy/*` |
+| 2026-02-13 | Updated .gitignore (secrets, .env, streamlit, logs), requirements.txt (+streamlit) | `.gitignore`, `requirements.txt` |
+| 2026-02-13 | Full README rewrite: dashboard usage, training, deployment on RPi, security | `README.md` |
+| 2026-02-13 | Updated plan.md: new sections 16 (Dashboard), 17 (Deployment) | `plan.md` |
 
 ---
 
@@ -66,7 +71,21 @@ Predict BTC price movement over the next **48 hours** using BlackRock IBIT ETF d
 │  ┌──────────┐ ┌──────────┐ ┌──────────────┐                │
 │  │  Charts  │ │  Tables  │ │  Tweet Mode  │                │
 │  │ (plotly) │ │ (pandas) │ │  (text block)│                │
-│  └──────────┘ └──────────┘ └──────────────┘                │
+│  └─────┬────┘ └─────┬────┘ └──────┬───────┘                │
+│        │            │             │                          │
+├────────┼────────────┼─────────────┼─────────────────────────┤
+│        ▼            ▼             ▼      DASHBOARD LAYER     │
+│  ┌─────────────────────────────────────────┐                │
+│  │   Streamlit App (app.py)                │                │
+│  │   Pages: Data / Model / Backtest / Pred │                │
+│  └──────────────┬──────────────────────────┘                │
+│                 │                                            │
+├─────────────────┼───────────────────────────────────────────┤
+│                 ▼          DEPLOYMENT LAYER                   │
+│  ┌──────────┐ ┌────────────┐ ┌──────────────┐              │
+│  │ systemd  │ │   Caddy    │ │ Let's Encrypt│              │
+│  │ service  │ │ rev. proxy │ │  auto-HTTPS  │              │
+│  └──────────┘ └────────────┘ └──────────────┘              │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -77,11 +96,13 @@ Predict BTC price movement over the next **48 hours** using BlackRock IBIT ETF d
 ```
 bitcoin-prediction/
 ├── plan.md                     # This file — single source of truth
+├── app.py                      # Streamlit dashboard (4 pages)
 ├── requirements.txt            # Pinned dependencies
-├── README.md                   # Quick-start instructions
+├── README.md                   # Full usage + deployment docs
+├── .gitignore
 ├── data/
-│   ├── ibit_flows.csv          # Fallback IBIT flow data
-│   └── btc_prices.csv          # Fallback BTC price data
+│   ├── ibit_flows.csv          # Real IBIT flow data (Farside scraper)
+│   └── btc_prices.csv          # Real BTC price data (yfinance)
 ├── src/
 │   ├── __init__.py
 │   ├── providers.py            # Data ingestion (online + CSV fallback)
@@ -92,6 +113,10 @@ bitcoin-prediction/
 ├── artifacts/                  # Saved models + scalers (timestamped)
 ├── notebooks/
 │   └── demo.py                 # Notebook-style script (cell markers)
+├── deploy/
+│   ├── btc-predict.service     # systemd unit file
+│   ├── Caddyfile               # Caddy reverse proxy template
+│   └── setup.sh                # One-shot deployment script
 └── tests/
     ├── test_features.py
     └── test_backtest.py
@@ -397,13 +422,86 @@ The notebook is structured with `# %%` cell markers (VS Code / Jupyter compatibl
 - LSTM/Transformer architecture for sequence modeling
 - Additional data sources (on-chain, sentiment, macro)
 - Intraday IBIT flow estimates
-- Streamlit dashboard for live monitoring
-- Automated daily data refresh + prediction pipeline
+- Automated daily data refresh + prediction pipeline (cron)
 - Ensemble models with confidence calibration
+- Dashboard: scheduled model retraining button with progress
 
 ---
 
-## 15. Implementation Status (Final)
+## 15. Streamlit Dashboard (`app.py`)
+
+Single-file Streamlit app with 4 pages. Reuses all `src/` modules — zero logic duplication.
+
+### 15.1 Pages
+
+| Page | Purpose | Key Controls |
+|------|---------|-------------|
+| **Data Explorer** | IBIT flow table, BTC charts, flow overlay | Row count slider, force-CSV toggle |
+| **Model** | View/train model, artifact info, fold results | Train params (min_train, val, test, lr, epochs, patience, threshold) |
+| **Backtest** | Interactive backtest with equity curves, drawdown, trades | Date range, threshold, tx cost bps, base asset (USD/BTC) |
+| **Daily Prediction** | Latest signal, tweet-ready text block | — (uses latest artifact) |
+
+### 15.2 Data Caching
+
+- `@st.cache_data(ttl=3600)` for data loading and feature building.
+- Force-CSV toggle in sidebar for offline mode.
+- Training triggers `st.rerun()` after artifact save.
+
+### 15.3 Backtest Page Controls
+
+The Backtest page runs the backtest engine in real-time with user-adjustable:
+- **Signal threshold**: 0.001–0.020 (slider)
+- **Transaction cost**: 0–50 bps (slider)
+- **Date range**: date pickers constrained to data range
+- **Base asset**: USD or BTC (for drawdown chart axis)
+
+Note: The backtest page uses the latest saved model/scaler to generate predictions over the full feature dataset, then filters by the user's date range. This is NOT walk-forward — it uses a single model for all predictions. Walk-forward OOS predictions are only available via the CLI notebook.
+
+---
+
+## 16. Deployment (`deploy/`)
+
+### 16.1 Architecture
+
+```
+Internet → Router (port 80/443) → Caddy (auto-HTTPS + basic auth)
+         → 127.0.0.1:8501 (Streamlit, systemd-managed)
+```
+
+### 16.2 Components
+
+| Component | File | Purpose |
+|-----------|------|---------|
+| systemd service | `deploy/btc-predict.service` | Runs Streamlit on boot, auto-restarts |
+| Caddy config | `deploy/Caddyfile` | Reverse proxy, auto-HTTPS, basic auth, security headers |
+| Setup script | `deploy/setup.sh` | One-shot install: Caddy + systemd + password prompt |
+
+### 16.3 Security
+
+- **Basic auth**: username `admin`, bcrypt-hashed password (set during setup)
+- **HTTPS**: Automatic via Let's Encrypt (Caddy handles cert provisioning + renewal)
+- **Streamlit binding**: `127.0.0.1` only (never exposed directly)
+- **Security headers**: `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: strict-origin-when-cross-origin`
+- **Firewall**: Only ports 22, 80, 443 open
+
+### 16.4 Domain
+
+Target domain: `lnodebtc.duckdns.org`
+Requires: router port forwarding 80+443 → Pi local IP, DuckDNS pointing to public IP.
+
+### 16.5 Checklist
+
+- [ ] DuckDNS domain `lnodebtc` configured and pointing to Pi's public IP
+- [ ] Router forwards port 80 (HTTP) → Pi's local IP
+- [ ] Router forwards port 443 (HTTPS) → Pi's local IP
+- [ ] `sudo deploy/setup.sh` executed (installs Caddy, sets password, starts services)
+- [ ] `sudo systemctl status btc-predict` shows active
+- [ ] `sudo systemctl status caddy` shows active
+- [ ] `https://lnodebtc.duckdns.org` loads with basic auth prompt
+
+---
+
+## 17. Implementation Status (Final)
 
 **All deliverables completed and verified.**
 
@@ -430,6 +528,17 @@ The notebook is structured with `# %%` cell markers (VS Code / Jupyter compatibl
 - **PyTorch 2.10.0** produces SIGILL on Raspberry Pi 5 (Cortex-A76, missing SVE instructions). **Pinned to 2.6.0** which works.
 - Training runs in ~2 min total for 20 folds on CPU.
 - Plotly `.show()` attempts to open browser; in headless mode, use `fig.write_html()` or Jupyter.
+
+### Dashboard
+- `app.py`: 4-page Streamlit dashboard, verified starts cleanly on RPi5
+- Reuses all `src/` modules, zero logic duplication
+- Cached data loading with 1-hour TTL
+- Force-CSV toggle for offline operation
+
+### Deployment
+- `deploy/btc-predict.service`: systemd unit, binds Streamlit to 127.0.0.1:8501
+- `deploy/Caddyfile`: Caddy reverse proxy template with basic auth + auto-HTTPS
+- `deploy/setup.sh`: interactive one-shot deploy script
 
 ### Tests
 - `tests/test_features.py`: 7 tests — leakage checks, column validation, shape checks

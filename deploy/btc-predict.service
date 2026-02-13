@@ -1,0 +1,21 @@
+[Unit]
+Description=BTC-IBIT Prediction Streamlit Dashboard
+After=network.target
+
+[Service]
+Type=simple
+User=pi
+Group=pi
+WorkingDirectory=/home/pi/AI-Startup-Lab/bitcoin-prediction
+ExecStart=/home/pi/AI-Startup-Lab/bitcoin-prediction/.venv/bin/streamlit run app.py \
+    --server.port=8501 \
+    --server.address=127.0.0.1 \
+    --server.headless=true \
+    --browser.gatherUsageStats=false \
+    --server.fileWatcherType=none
+Restart=always
+RestartSec=10
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
