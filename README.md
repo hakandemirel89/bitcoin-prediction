@@ -166,7 +166,7 @@ tail -f /var/log/caddy/btc-predict.log
 
 ### Security Notes
 
-- Dashboard is behind **basic auth** (username: `pi`)
+- Dashboard is publicly accessible (no authentication)
 - HTTPS is automatic via Let's Encrypt (Caddy handles renewal)
 - Streamlit binds to `127.0.0.1` only (not directly exposed)
 - Security headers: `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`

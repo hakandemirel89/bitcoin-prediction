@@ -1,14 +1,8 @@
 lnodebtc.duckdns.org {
     # Dashboard lives at /ibit — the root path is free for other services
     handle /ibit* {
-        basicauth {
-            # Replace <HASH> with output of: caddy hash-password --plaintext 'YourPassword'
-            pi <HASH>
-        }
-
         reverse_proxy 127.0.0.1:8501
 
-        # Security headers
         header {
             X-Content-Type-Options nosniff
             X-Frame-Options DENY
