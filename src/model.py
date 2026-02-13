@@ -153,16 +153,22 @@ def walk_forward_train(
     X: np.ndarray,
     y: np.ndarray,
     dates: pd.Series,
-    min_train: int = 120,
-    val_size: int = 30,
-    test_size: int = 30,
+    train_size: int = 120,
+    val_size: int = 20,
+    step_size: int = 1,
+    progress_callback=None,
     **train_kwargs,
 ) -> dict:
     """
-    Walk-forward (expanding window) training and out-of-sample prediction.
+    Walk-forward (rolling window) training and out-of-sample prediction.
+
+    For each prediction step, trains a fresh model on the previous
+    `train_size` days, validates on the next `val_size` days, then
+    predicts `step_size` day(s).  This produces one model per step —
+    a truly rolling out-of-sample backtest with no look-ahead bias.
 
     Returns dict with:
-        - predictions: np.ndarray of OOS predictions (aligned with dates)
+        - predictions: np.ndarray of OOS predictions
         - actuals: np.ndarray of actual values
         - pred_dates: pd.Series of dates for predictions
         - fold_results: list of per-fold info dicts
@@ -177,21 +183,24 @@ def walk_forward_train(
     all_dates = []
     fold_results = []
 
+    first_test = train_size + val_size
+    total_steps = max(0, (n - first_test) // step_size)
+
     fold = 0
-    start = 0
+    cursor = first_test
 
-    while start + min_train + val_size + test_size <= n:
-        train_end = start + min_train + fold * test_size
-        val_end = train_end + val_size
-        test_end = min(val_end + test_size, n)
+    while cursor + step_size <= n:
+        train_start = cursor - val_size - train_size
+        train_end = cursor - val_size
+        val_end = cursor
+        test_end = min(cursor + step_size, n)
 
-        if train_end >= n or val_end >= n:
-            break
-
-        # Split
-        X_train, y_train = X[:train_end], y[:train_end]
-        X_val, y_val = X[train_end:val_end], y[train_end:val_end]
-        X_test, y_test = X[val_end:test_end], y[val_end:test_end]
+        X_train = X[train_start:train_end]
+        y_train = y[train_start:train_end]
+        X_val = X[train_end:val_end]
+        y_val = y[train_end:val_end]
+        X_test = X[val_end:test_end]
+        y_test = y[val_end:test_end]
         test_dates = dates.iloc[val_end:test_end]
 
         if len(X_test) == 0:
@@ -225,25 +234,32 @@ def walk_forward_train(
             "val_size": len(X_val),
             "test_size": len(X_test),
             "train_end_date": str(dates.iloc[train_end - 1]),
-            "test_start_date": str(test_dates.iloc[0]),
-            "test_end_date": str(test_dates.iloc[-1]),
+            "test_date": str(test_dates.iloc[0]),
             "best_val_loss": min(va_loss) if va_loss else float("inf"),
             "epochs_trained": len(tr_loss),
         })
 
-        logger.info(
-            "Fold %d: train=%d, val=%d, test=%d, best_val=%.6f",
-            fold, len(X_train), len(X_val), len(X_test), fold_results[-1]["best_val_loss"]
-        )
+        if fold % 50 == 0:
+            logger.info(
+                "Fold %d/%d: train=[%s..%s], test=%s, val_loss=%.6f",
+                fold, total_steps,
+                str(dates.iloc[train_start])[:10],
+                str(dates.iloc[train_end - 1])[:10],
+                str(test_dates.iloc[0])[:10],
+                fold_results[-1]["best_val_loss"],
+            )
+
+        if progress_callback:
+            progress_callback(fold + 1, total_steps)
 
         fold += 1
-
-        if test_end >= n:
-            break
+        cursor += step_size
 
     predictions = np.concatenate(all_preds) if all_preds else np.array([])
     actuals = np.concatenate(all_actuals) if all_actuals else np.array([])
     pred_dates = pd.to_datetime(np.concatenate(all_dates)) if all_dates else pd.DatetimeIndex([])
+
+    logger.info("Walk-forward complete: %d folds, %d OOS predictions", fold, len(predictions))
 
     return {
         "predictions": predictions,
@@ -285,9 +301,10 @@ def save_artifacts(
     feature_cols: list,
     threshold: float,
     fold_results: list,
+    predictions_data: Optional[dict] = None,
     directory: Optional[Path] = None,
 ) -> Path:
-    """Save model, scaler, and metadata with timestamp."""
+    """Save model, scaler, metadata, and optionally OOS predictions."""
     save_dir = directory or ARTIFACTS_DIR
     save_dir.mkdir(parents=True, exist_ok=True)
 
@@ -302,24 +319,40 @@ def save_artifacts(
     with open(scaler_path, "wb") as f:
         pickle.dump(scaler, f)
 
+    # Sample fold results for metadata (keep every 10th for display)
+    sampled_folds = fold_results[::max(1, len(fold_results) // 20)] if fold_results else []
+    avg_val_loss = float(np.mean([f["best_val_loss"] for f in fold_results])) if fold_results else 0.0
+
     # Metadata
     meta = {
         "timestamp": ts,
         "feature_columns": feature_cols,
         "threshold": threshold,
         "n_features": len(feature_cols),
-        "fold_results": fold_results,
+        "n_folds": len(fold_results),
+        "avg_val_loss": avg_val_loss,
+        "fold_results_sampled": sampled_folds,
     }
     meta_path = save_dir / f"metadata_{ts}.json"
     with open(meta_path, "w") as f:
         json.dump(meta, f, indent=2, default=str)
+
+    # Predictions CSV (rolling OOS predictions for backtest)
+    if predictions_data is not None:
+        pred_df = pd.DataFrame({
+            "date": predictions_data["pred_dates"],
+            "prediction": predictions_data["predictions"],
+            "actual": predictions_data["actuals"],
+        })
+        pred_path = save_dir / f"predictions_{ts}.csv"
+        pred_df.to_csv(pred_path, index=False)
 
     logger.info("Artifacts saved to %s with timestamp %s", save_dir, ts)
     return save_dir
 
 
 def load_latest_artifacts(directory: Optional[Path] = None):
-    """Load the most recent model, scaler, and metadata."""
+    """Load the most recent model, scaler, metadata, and predictions."""
     load_dir = directory or ARTIFACTS_DIR
 
     # Find latest metadata
@@ -343,7 +376,13 @@ def load_latest_artifacts(directory: Optional[Path] = None):
     model.load_state_dict(torch.load(load_dir / f"model_{ts}.pt", weights_only=True))
     model.eval()
 
-    return model, scaler, meta
+    # Load rolling predictions (if available)
+    pred_path = load_dir / f"predictions_{ts}.csv"
+    predictions_df = None
+    if pred_path.exists():
+        predictions_df = pd.read_csv(pred_path, parse_dates=["date"])
+
+    return model, scaler, meta, predictions_df
 
 
 # ---------------------------------------------------------------------------

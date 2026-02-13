@@ -69,13 +69,13 @@ print(f"  max:   {y.max():.5f}")
 # %% Cell 5 — Walk-Forward Model Training
 from src.model import walk_forward_train, predictions_to_signals, save_artifacts
 
-logger.info("Starting walk-forward training...")
+logger.info("Starting rolling walk-forward training...")
 
 wf_results = walk_forward_train(
     X, y, dates,
-    min_train=90,       # Reduced for limited data
+    train_size=90,      # Rolling window: last 90 days
     val_size=20,
-    test_size=20,
+    step_size=1,        # Daily rolling model (new model per day)
     max_epochs=200,
     batch_size=32,
     lr=1e-3,
@@ -207,6 +207,11 @@ if wf_results["final_model"] is not None:
         feature_cols=feature_cols,
         threshold=SIGNAL_THRESHOLD,
         fold_results=wf_results["fold_results"],
+        predictions_data={
+            "predictions": wf_results["predictions"],
+            "actuals": wf_results["actuals"],
+            "pred_dates": wf_results["pred_dates"],
+        },
     )
     print(f"\nArtifacts saved to: {save_dir}")
 else:

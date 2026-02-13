@@ -149,65 +149,88 @@ elif page == "Model":
 
         st.success(f"Latest artifact: `{latest_meta_path.name}`")
 
-        c1, c2, c3 = st.columns(3)
+        n_folds = meta.get("n_folds", len(meta.get("fold_results", meta.get("fold_results_sampled", []))))
+        avg_loss = meta.get("avg_val_loss", 0)
+
+        c1, c2, c3, c4 = st.columns(4)
         c1.metric("Features", meta["n_features"])
         c2.metric("Threshold", f"{meta['threshold']}")
-        c3.metric("Timestamp", meta["timestamp"])
+        c3.metric("Rolling Folds", n_folds)
+        c4.metric("Avg Val Loss", f"{avg_loss:.6f}")
 
         # Feature list
         with st.expander("Feature Columns", expanded=False):
             for i, col in enumerate(meta["feature_columns"], 1):
                 st.text(f"  {i:2d}. {col}")
 
-        # Fold results
-        if meta.get("fold_results"):
-            st.subheader("Walk-Forward Fold Results")
-            folds_df = pd.DataFrame(meta["fold_results"])
-            st.dataframe(folds_df, use_container_width=True)
-
-            # Val loss chart
+        # Fold results — use sampled folds for chart
+        folds = meta.get("fold_results_sampled", meta.get("fold_results", []))
+        if folds:
+            st.subheader("Validation Loss Over Time (sampled)")
             fig = go.Figure()
-            fig.add_trace(go.Bar(
-                x=[f"Fold {r['fold']}" for r in meta["fold_results"]],
-                y=[r["best_val_loss"] for r in meta["fold_results"]],
-                marker_color="#3498db",
+            fig.add_trace(go.Scatter(
+                x=[r.get("test_date", f"Fold {r['fold']}") for r in folds],
+                y=[r["best_val_loss"] for r in folds],
+                mode="lines+markers",
+                marker=dict(color="#3498db", size=5),
+                line=dict(color="#3498db"),
             ))
-            fig.update_layout(title="Best Validation Loss per Fold",
-                              yaxis_title="MSE", template="plotly_dark", height=350)
+            fig.update_layout(title="Best Validation Loss per Rolling Fold",
+                              xaxis_title="Test Date", yaxis_title="MSE",
+                              template="plotly_dark", height=350)
             st.plotly_chart(fig, use_container_width=True)
     else:
         st.warning("No trained model found. Train one below.")
 
     # Training button
-    st.subheader("Train New Model")
+    st.subheader("Train New Rolling Model")
+    st.caption("Trains a **new model for each day** using a rolling window of the "
+               "last N days. This is the correct approach for backtesting — "
+               "no single model sees future data.")
     with st.expander("Training Parameters", expanded=not bool(meta_files)):
         tc1, tc2, tc3 = st.columns(3)
-        min_train = tc1.number_input("Min train days", 60, 300, 90)
-        val_size = tc2.number_input("Val window", 10, 60, 20)
-        test_size = tc3.number_input("Test window", 10, 60, 20)
+        train_size = tc1.number_input("Train window (days)", 60, 300, 90)
+        val_size = tc2.number_input("Val window (days)", 10, 60, 20)
+        step_size = tc3.number_input("Step size (days)", 1, 10, 1)
         tc4, tc5, tc6 = st.columns(3)
         max_epochs = tc4.number_input("Max epochs", 50, 500, 200)
         lr = tc5.number_input("Learning rate", 1e-5, 1e-1, 1e-3, format="%.5f")
         patience_val = tc6.number_input("Early stop patience", 5, 50, 15)
         threshold = st.number_input("Signal threshold", 0.001, 0.05, 0.005, format="%.4f")
 
-    if st.button("Train Walk-Forward Model", type="primary"):
+    if st.button("Train Rolling Walk-Forward Model", type="primary"):
         X, y, dates, feature_cols, clean_df = load_features(merged)
 
-        with st.spinner(f"Training walk-forward on {len(X)} samples..."):
-            wf = walk_forward_train(
-                X, y, dates,
-                min_train=min_train, val_size=val_size, test_size=test_size,
-                max_epochs=max_epochs, lr=lr, patience=patience_val,
+        n_folds_est = max(0, (len(X) - train_size - val_size) // step_size)
+        progress_bar = st.progress(0, text=f"Training fold 0/{n_folds_est}...")
+
+        def update_progress(current, total):
+            progress_bar.progress(
+                min(current / max(total, 1), 1.0),
+                text=f"Training fold {current}/{total}..."
             )
+
+        wf = walk_forward_train(
+            X, y, dates,
+            train_size=train_size, val_size=val_size, step_size=step_size,
+            max_epochs=max_epochs, lr=lr, patience=patience_val,
+            progress_callback=update_progress,
+        )
+
+        progress_bar.empty()
 
         if wf["final_model"] is not None:
             save_artifacts(
                 wf["final_model"], wf["final_scaler"], feature_cols,
                 threshold, wf["fold_results"],
+                predictions_data={
+                    "predictions": wf["predictions"],
+                    "actuals": wf["actuals"],
+                    "pred_dates": wf["pred_dates"],
+                },
             )
-            st.success(f"Model trained: {len(wf['fold_results'])} folds, "
-                        f"{len(wf['predictions'])} OOS predictions")
+            st.success(f"Model trained: {len(wf['fold_results'])} rolling folds, "
+                        f"{len(wf['predictions'])} OOS predictions saved")
             st.rerun()
         else:
             st.error("Training produced no model — check data size.")
@@ -227,45 +250,55 @@ elif page == "Backtest":
         tx_cost = st.slider("Transaction cost (bps)", 0.0, 50.0, 10.0, 1.0)
         base_asset = st.radio("Base asset", ["USD", "BTC"], index=0)
 
-    # We need features + model
-    X, y, dates, feature_cols, clean_df = load_features(merged)
-
+    # Load saved rolling walk-forward predictions
     artifacts_dir = PROJECT_ROOT / "artifacts"
     try:
-        model, scaler, meta = load_latest_artifacts(artifacts_dir)
+        model, scaler, meta, predictions_df = load_latest_artifacts(artifacts_dir)
     except FileNotFoundError:
         st.warning("No trained model found. Go to **Model** page to train first.")
         st.stop()
 
-    # Generate predictions using the loaded model
-    import torch
-    model.eval()
-    X_scaled = scaler.transform(X)
-    with torch.no_grad():
-        predictions = model(torch.tensor(X_scaled, dtype=torch.float32)).numpy()
+    if predictions_df is None or predictions_df.empty:
+        st.warning("No rolling walk-forward predictions found. "
+                   "Retrain on the **Model** page to generate per-day OOS predictions.")
+        st.stop()
+
+    # Merge predictions with BTC prices
+    bt_data = predictions_df.merge(
+        merged[["date", "btc_close"]], on="date", how="inner"
+    )
+
+    if len(bt_data) < 2:
+        st.warning("Not enough data points for backtest.")
+        st.stop()
+
+    st.caption(f"Using **{len(bt_data)}** rolling out-of-sample predictions "
+               f"(one model per day, no look-ahead bias)")
+
+    # Generate signals from saved predictions
+    predictions = bt_data["prediction"].values
     signals = predictions_to_signals(predictions, threshold=threshold)
 
     # Date range filter
-    min_date = dates.iloc[0].date()
-    max_date = dates.iloc[-1].date()
+    min_date = bt_data["date"].iloc[0].date()
+    max_date = bt_data["date"].iloc[-1].date()
     col1, col2 = st.columns(2)
     start_date = col1.date_input("Start date", min_date, min_value=min_date, max_value=max_date)
     end_date = col2.date_input("End date", max_date, min_value=min_date, max_value=max_date)
 
     # Filter
-    mask = (dates.dt.date >= start_date) & (dates.dt.date <= end_date)
-    bt_dates = dates[mask].reset_index(drop=True)
-    bt_prices = clean_df.loc[mask.values, "btc_close"].values
+    mask = (bt_data["date"].dt.date >= start_date) & (bt_data["date"].dt.date <= end_date)
+    bt_filtered = bt_data[mask].reset_index(drop=True)
     bt_signals = signals[mask.values]
 
-    if len(bt_dates) < 2:
+    if len(bt_filtered) < 2:
         st.warning("Need at least 2 data points for backtest.")
         st.stop()
 
     # Run
     bt = run_backtest(
-        dates=bt_dates,
-        btc_close=bt_prices,
+        dates=bt_filtered["date"],
+        btc_close=bt_filtered["btc_close"].values,
         signals=bt_signals,
         initial_btc=1.0,
         tx_cost_bps=tx_cost,
@@ -351,7 +384,7 @@ elif page == "Daily Prediction":
 
     artifacts_dir = PROJECT_ROOT / "artifacts"
     try:
-        model, scaler, meta = load_latest_artifacts(artifacts_dir)
+        model, scaler, meta, _ = load_latest_artifacts(artifacts_dir)
         feature_cols = meta["feature_columns"]
         threshold = meta["threshold"]
     except FileNotFoundError:
