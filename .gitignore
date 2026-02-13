@@ -1,0 +1,22 @@
+# Virtual environment
+.venv/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Pytest
+.pytest_cache/
+
+# IDE
+.vscode/
+.idea/
+
+# Artifacts (models are large, regenerate locally)
+artifacts/*.pt
+artifacts/*.pkl
+
+# OS
+.DS_Store
+Thumbs.db
